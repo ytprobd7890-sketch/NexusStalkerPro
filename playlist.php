@@ -169,7 +169,6 @@ if (!empty($_GET['segment'])) {
     $cacheDir = __DIR__ . '/data/cache_segments';
     $cacheFile = $cacheDir . '/' . md5($url) . '.ts';
 
-    // Ensure segment cache directory exists
     if (!file_exists($cacheDir)) {
         @mkdir($cacheDir, 0777, true);
     }
@@ -182,7 +181,7 @@ if (!empty($_GET['segment'])) {
         exit;
     }
 
-    // Cache MISS: Fetch from portal CDN and write to both client and disk
+    // Cache MISS: Fetch from Portal CDN and write to both client and disk
     header('X-Cache-Status: MISS');
     $fp = @fopen($cacheFile, 'w');
     $headersSent = false;
@@ -211,10 +210,8 @@ if (!empty($_GET['segment'])) {
                 if ($httpCode !== 200 && $httpCode !== 0) return 0;
                 $headersSent = true;
             }
-            // Stream immediately to player
             echo $data;
             flush();
-            // Cache chunk to 1TB storage
             if ($fp) {
                 fwrite($fp, $data);
             }
@@ -228,13 +225,12 @@ if (!empty($_GET['segment'])) {
     }
 
     if (!$result && !$headersSent) {
-        @unlink($cacheFile); // Clean up corrupted cache file
+        @unlink($cacheFile); 
         http_response_code(502);
         echo 'Segment fetch failed';
     }
 
-    // Active Sliding-Window Garbage Collection:
-    // 1% of segment requests triggers automated cleaning of segments older than 180s (3 minutes)
+    // Automated cache cleanup (1% chance per request)
     if (random_int(1, 100) === 1) {
         $files = glob($cacheDir . '/*.ts');
         $now = time();
@@ -329,6 +325,10 @@ function processAndServeManifest(string $data, string $sourceUrl, string $selfUr
     $lines   = explode("\n", $data);
     $newLines = [];
 
+    // Load Pro Cache Node URL
+    global $userAccount;
+    $cacheNodeUrl = rtrim($userAccount['cache_node_url'] ?? '', '/');
+
     foreach ($lines as $line) {
         $line = trim($line);
         if (empty($line)) { $newLines[] = ''; continue; }
@@ -350,7 +350,13 @@ function processAndServeManifest(string $data, string $sourceUrl, string $selfUr
         $encrypted = xorEncode($fullUrl);
 
         if (isSegment($line)) {
-            $newLines[] = $selfUrl . '?segment=' . urlencode($encrypted);
+            if (!empty($cacheNodeUrl)) {
+                // Route directly to PRO Cache Node (Container 2)
+                $newLines[] = $cacheNodeUrl . '/segment?url=' . urlencode($encrypted);
+            } else {
+                // Route to local playlist.php proxy (Container 1)
+                $newLines[] = $selfUrl . '?segment=' . urlencode($encrypted);
+            }
         } else {
             $newLines[] = $selfUrl . '?chunks=' . urlencode($encrypted);
         }
@@ -458,7 +464,7 @@ if (isset($_GET['id'])) {
         die('Channel not found');
     }
 
-    // Initialise StalkerLite with the cached token — no new handshake needed
+    // Initialise StalkerLite with the cached token
     $stk = new StalkerLite(
         $portal['url'],
         $portal['mac'],
@@ -470,10 +476,8 @@ if (isset($_GET['id'])) {
     $streamUrl = $stk->createLink($cmd);
 
     if (empty($streamUrl)) {
-        // Token may have expired — try a fresh handshake once
         $fresh = $stk->handshake();
         if ($fresh['success']) {
-            // Persist fresh token
             $portal['token']    = $fresh['token'];
             $portal['random']   = $fresh['random'];
             $portal['saved_at'] = date('Y-m-d H:i:s');
@@ -490,10 +494,8 @@ if (isset($_GET['id'])) {
 
     // ─── Check proxy setting ─────────────────────────────────────────────
     if (isProxyActive()) {
-        // Proxy mode: route stream through this server
         $lowerUrl = strtolower($streamUrl);
         if (strpos($lowerUrl, '.m3u8') !== false || strpos($lowerUrl, '.m3u') !== false) {
-            // HLS manifest — fetch, rewrite, serve
             $ch = curl_init();
             curl_setopt_array($ch, [
                 CURLOPT_URL            => $streamUrl,
@@ -516,17 +518,14 @@ if (isset($_GET['id'])) {
             }
             exit;
         } elseif (strpos($lowerUrl, '.ts') !== false) {
-            // Direct TS segment — proxy stream it
             smartProxyStream($streamUrl, $self);
             exit;
         } else {
-            // Unknown format — smart detect
             smartProxyStream($streamUrl, $self);
             exit;
         }
     }
 
-    // Direct mode: 302 redirect — stream goes from CDN to app, zero proxy
     header('Location: ' . $streamUrl, true, 302);
     exit;
 }
@@ -555,34 +554,32 @@ if (!$channels) {
     exit;
 }
 
-// ─── Filter out channels from hidden categories ───────────────────────────────
+// Filter out channels from hidden categories
 $visibleChannels = [];
 foreach ($channels['channels'] as $ch) {
     $gId   = $ch['genre_id'] ?? '';
     $gName = $ch['genre_name'] ?? 'General';
     
-    // Check if this category is set as hidden
     if (in_array($gId, $hiddenGenres) || in_array($gName, $hiddenGenres)) {
         continue;
     }
     $visibleChannels[] = $ch;
 }
 
-// ─── Build M3U EPG x-tvg-url & url-tvg List (EPG SOURCE ADD!) ─────────────────
+// Build M3U EPG list
 $tvgUrls = [];
 foreach ($epgSources as $src) {
     if (!empty($src['url'])) {
         $tvgUrls[] = $src['url'];
     }
 }
-// Append our local epg.php URL as well!
 $localEpgUrl = $proto . '://' . $host . rtrim(dirname($_SERVER['SCRIPT_NAME'] ?? '/playlist.php'), '/') . '/epg.php' . (!empty($requiredToken) ? '?token=' . urlencode($requiredToken) : '');
 $tvgUrls[] = $localEpgUrl;
 
 $epgListCsv = implode(',', $tvgUrls);
 $xtvgUrlAttribute = ' x-tvg-url="' . $epgListCsv . '" url-tvg="' . $epgListCsv . '"';
 
-// ─── Output M3U ───────────────────────────────────────────────────────────────
+// Output M3U
 $portalName = $portal['name'] ?? 'Stalker Portal';
 $fetched    = $channels['fetched_at'] ?? '';
 $count      = count($visibleChannels);

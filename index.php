@@ -1,7 +1,7 @@
 <?php
 /**
  * Nexus — Premium Stalker Portal Manager (Ezyro Free Host Upgraded)
- * Multi-portal · Token saved to JSON · No database · Secure Playlist, EPG, Category Filtering & Custom EPG Sources
+ * Multi-portal · Token saved to JSON · No database · Secure Playlist, EPG, Category Filtering & Custom EPG Sources & API Proxy
  */
 
 if (session_status() === PHP_SESSION_NONE) {
@@ -141,6 +141,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'device_id' => $_POST['device_id'] ?? '',
             'device_id2'=> $_POST['device_id2']?? '',
             'signature' => $_POST['signature'] ?? '',
+            'proxy'     => $_POST['proxy']     ?? '', 
         ]);
 
         if (!$name || !$url || !$mac) {
@@ -186,7 +187,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
 
             } else {
-                $_SESSION['flash'] = ['type' => 'error', 'msg' => $result['error'] ?? 'Handshake failed. Check credentials.'];
+                $_SESSION['flash'] = ['type' => 'error', 'msg' => $result['error'] ?? 'Handshake failed. Check credentials/Proxy settings.'];
             }
         }
         
@@ -236,8 +237,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // ── Save Category Filters
     if ($action === 'save_categories') {
-        $visibleGenres = $_POST['genres'] ?? []; // Checked visible genre IDs/names
-        $allUniqueGenres = $_POST['all_unique_genres'] ?? []; // All unique genre IDs/names
+        $visibleGenres = $_POST['genres'] ?? []; 
+        $allUniqueGenres = $_POST['all_unique_genres'] ?? []; 
 
         $hiddenGenres = [];
         foreach ($allUniqueGenres as $g) {
@@ -247,7 +248,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         file_put_contents(HIDDEN_GENRES_FILE, json_encode($hiddenGenres, JSON_PRETTY_PRINT));
-        @unlink(__DIR__ . '/data/epg_cache.xml'); // Clear EPG cache to force recalculation with active categories
+        @unlink(__DIR__ . '/data/epg_cache.xml'); 
         $_SESSION['flash'] = ['type' => 'success', 'msg' => 'Category preferences saved successfully! Playlist and EPG updated instantly.'];
         header("Location: " . $_SERVER['PHP_SELF']);
         exit;
@@ -292,6 +293,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    // ── Save Proxy and Cache Settings
+    if ($action === 'toggle_proxy') {
+        $user = loadUserAccount();
+        if ($user) {
+            // Save toggle state
+            $toggle = $_POST['stream_proxy_toggle'] ?? 'inactive';
+            $user['stream_proxy'] = ($toggle === 'active') ? 'active' : 'inactive';
+            
+            // Save Cache Node URL
+            $cacheUrl = trim($_POST['cache_node_url'] ?? '');
+            $user['cache_node_url'] = $cacheUrl;
+            
+            saveUserAccount($user);
+            $_SESSION['flash'] = ['type' => 'success', 'msg' => 'Stream proxy and PRO Cache Node settings saved successfully!'];
+        } else {
+            $_SESSION['flash'] = ['type' => 'error', 'msg' => 'User account not found.'];
+        }
+        header("Location: " . $_SERVER['PHP_SELF']);
+        exit;
+    }
+
     // ── Update Access Token
     if ($action === 'update_token') {
         $newToken = trim($_POST['access_token'] ?? '');
@@ -319,23 +341,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // ── Clear everything
     if ($action === 'clear') {
         clearData();
-        $_SESSION['flash'] = ['type' => 'success', 'msg' => 'All portal configurations and cached data wiped successfully.'];
-        header("Location: " . $_SERVER['PHP_SELF']);
-        exit;
-    }
-
-    // ── Toggle stream proxy
-    if ($action === 'toggle_proxy') {
-        $user = loadUserAccount();
-        if ($user) {
-            $current = $user['stream_proxy'] ?? 'inactive';
-            $user['stream_proxy'] = ($current === 'active') ? 'inactive' : 'active';
-            saveUserAccount($user);
-            $newState = $user['stream_proxy'];
-            $_SESSION['flash'] = ['type' => 'success', 'msg' => 'Stream proxy ' . ($newState === 'active' ? 'enabled' : 'disabled') . '.'];
-        } else {
-            $_SESSION['flash'] = ['type' => 'error', 'msg' => 'User account not found.'];
-        }
+        $_SESSION['flash'] = ['type' => 'success', 'msg' => 'All configurations, cache and databases wiped successfully.'];
         header("Location: " . $_SERVER['PHP_SELF']);
         exit;
     }
@@ -388,7 +394,7 @@ if (file_exists(HIDDEN_GENRES_FILE)) {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Nexus Premium | Portal Manager</title>
-<meta name="description" content="Nexus — Multi-Portal Stalker Manager with Custom EPG sources.">
+<meta name="description" content="Nexus — Multi-Portal Stalker Manager with Category Filtering & EPG support.">
 <link rel="icon" type="image/png" sizes="128x128" href="data/logo.png">
 <link rel="apple-touch-icon" href="data/logo.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -626,6 +632,12 @@ input:focus, select:focus {
     box-shadow: var(--shadow-sm);
 }
 .btn-ghost:hover { background: var(--bg); border-color: var(--border-hover); color: var(--text-main); }
+
+.btn-cyan {
+    background: var(--surface); border: 1px solid var(--border); color: var(--cyan);
+    box-shadow: var(--shadow-sm); flex: 1;
+}
+.btn-cyan:hover { background: var(--cyan-bg); border-color: rgba(6,182,212,0.3); }
 
 /* Spinner */
 .spin-wrap { display: none; }
@@ -1110,25 +1122,36 @@ input:focus, select:focus {
                         <div class="field">
                             <label>SN Cut</label>
                             <div class="fw"><i class="fas fa-barcode"></i>
-                                <input type="text" name="sn_cut" class="mono" placeholder="Auto">
+                                <input type="text" name="sn_cut" class="mono" placeholder="Auto"
+                                       value="<?= $e($portal['device']['snCut'] ?? '') ?>">
                             </div>
                         </div>
                         <div class="field">
                             <label>Signature</label>
                             <div class="fw"><i class="fas fa-key"></i>
-                                <input type="text" name="signature" class="mono" placeholder="Auto">
+                                <input type="text" name="signature" class="mono" placeholder="Auto"
+                                       value="<?= $e($portal['device']['signature'] ?? '') ?>">
                             </div>
                         </div>
                         <div class="field">
                             <label>Device ID</label>
                             <div class="fw"><i class="fas fa-microchip"></i>
-                                <input type="text" name="device_id" class="mono" placeholder="Auto">
+                                <input type="text" name="device_id" class="mono" placeholder="Auto"
+                                       value="<?= $e($portal['device']['deviceId'] ?? '') ?>">
                             </div>
                         </div>
                         <div class="field">
                             <label>Device ID 2</label>
                             <div class="fw"><i class="fas fa-microchip"></i>
-                                <input type="text" name="device_id2" class="mono" placeholder="Auto">
+                                <input type="text" name="device_id2" class="mono" placeholder="Auto"
+                                       value="<?= $e($portal['device']['deviceId2'] ?? '') ?>">
+                            </div>
+                        </div>
+                        <div class="field full">
+                            <label>STALKER API PROXY (SOCKS5/HTTP - Optional to bypass IP block)</label>
+                            <div class="fw"><i class="fas fa-globe"></i>
+                                <input type="text" name="proxy" placeholder="socks5://user:pass@ip:port or http://ip:port"
+                                       value="<?= $e($portal['device']['proxy'] ?? '') ?>">
                             </div>
                         </div>
                     </div>
@@ -1318,7 +1341,7 @@ input:focus, select:focus {
 <?php endif; ?>
 
 
-<!-- ── CUSTOM EXTERNAL EPG SOURCES MANAGER (EPG SOURCE ADD!) ──────────────── -->
+<!-- ── CUSTOM EXTERNAL EPG SOURCES MANAGER ────────────────────────────────── -->
 <div class="card fade" style="animation-delay: 0.24s; animation-fill-mode: both;">
     <div class="card-hd">
         <div class="card-hd-icon ci-cyan"><i class="fas fa-file-invoice"></i></div>
@@ -1329,7 +1352,6 @@ input:focus, select:focus {
     </div>
     <div class="card-bd">
         
-        <!-- Add EPG Source Form -->
         <form method="post" action="" style="margin-bottom:18px; padding-bottom:16px; border-bottom:1px dashed var(--border);">
             <input type="hidden" name="action" value="add_epg_source">
             <div class="row2">
@@ -1351,7 +1373,6 @@ input:focus, select:focus {
             </button>
         </form>
 
-        <!-- Saved EPG Sources List -->
         <h3 style="font-size:0.8rem; font-weight:700; margin-bottom:8px; color:var(--text-main);"><i class="fas fa-list"></i> Saved EPG Sources</h3>
         <?php if (!empty($epgSources)): ?>
             <?php foreach ($epgSources as $id => $src): ?>
@@ -1410,40 +1431,63 @@ input:focus, select:focus {
     <div class="card-hd" style="padding: 12px 20px;">
         <div class="card-hd-icon ci-blue" style="background: <?= $proxyActive ? 'var(--indigo-bg)' : 'var(--primary-bg)' ?>; color: <?= $proxyActive ? 'var(--indigo)' : 'var(--primary)' ?>;"><i class="fas fa-shield-alt"></i></div>
         <div class="card-hd-text" style="flex: 1;">
-            <h2>Stream Proxy</h2>
-            <p><?= $proxyActive ? 'Streams via your server' : 'Direct CDN redirect' ?></p>
+            <h2>Stream Proxy &amp; PRO Cache Node</h2>
+            <p><?= $proxyActive ? 'Streams routed through your caching servers' : 'Direct CDN redirect' ?></p>
         </div>
-        <form method="post" id="proxy-form" style="display:flex; align-items:center; gap: 10px; margin:0;">
-            <input type="hidden" name="action" value="toggle_proxy">
-            <label class="toggle-switch">
-                <input type="checkbox" <?= $proxyActive ? 'checked' : '' ?> onchange="document.getElementById('proxy-form').submit();">
-                <span class="toggle-slider"></span>
-            </label>
-        </form>
     </div>
-    <div class="card-bd" style="padding: 10px 20px 14px; border-top: 1px solid var(--border); background: #fefcf5; border-left: 4px solid var(--warning);">
-        <?php if ($proxyActive): ?>
-        <div style="display:flex; gap:10px; align-items:flex-start;">
-            <i class="fas fa-exclamation-triangle" style="color:var(--warning); margin-top:2px; flex-shrink:0;"></i>
-            <p style="font-size:0.78rem; color:#854d0e; line-height:1.45; margin:0;">
-                <strong style="color:var(--text-main);">⚠️ Free Host Warning:</strong> Stream Proxy is currently <strong style="color:var(--text-main);">ON</strong>. On free hosts like Ezyro, proxying video consumes huge resources and will result in connection timeouts or account suspension. It is highly recommended to turn this <strong>OFF</strong>.
-            </p>
+    <div class="card-bd" style="padding: 14px 20px; border-top: 1px solid var(--border);">
+        <form method="post" id="proxy-config-form" action="">
+            <input type="hidden" name="action" value="toggle_proxy">
+            
+            <!-- Proxy Toggle Row -->
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; padding-bottom:12px; border-bottom:1px dashed var(--border);">
+                <div>
+                    <h4 style="font-size:0.85rem; font-weight:700; color:var(--text-main);">Enable Stream Proxy</h4>
+                    <p style="font-size:0.75rem; color:var(--text-muted);">Route live video segments through proxy</p>
+                </div>
+                <label class="toggle-switch">
+                    <input type="checkbox" name="stream_proxy_toggle" value="active" <?= $proxyActive ? 'checked' : '' ?> onchange="document.getElementById('proxy-config-form').submit();">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+
+            <!-- Cache Node URL Input -->
+            <div class="field" style="margin-bottom:14px;">
+                <label style="color:var(--text-main); font-weight:700; font-size:0.75rem;">Pro Cache Node URL (Optional - Container 2)</label>
+                <div class="fw"><i class="fas fa-network-wired"></i>
+                    <input type="url" name="cache_node_url" value="<?= $e($userAccount['cache_node_url'] ?? '') ?>" placeholder="https://pro-cache-node.up.railway.app" style="font-size:0.8rem; padding: 6px 12px 6px 38px;">
+                </div>
+            </div>
+            
+            <button type="submit" class="btn btn-primary" style="width:100%; font-size:0.8rem; padding: 8px 16px;">
+                <i class="fas fa-save"></i> Save Proxy &amp; Cache Settings
+            </button>
+        </form>
+        
+        <div style="margin-top:14px; padding-top:12px; border-top:1px dashed var(--border);">
+            <?php if ($proxyActive): ?>
+            <div style="display:flex; gap:10px; align-items:flex-start;">
+                <i class="fas fa-info-circle" style="color:var(--indigo); margin-top:2px; flex-shrink:0;"></i>
+                <p style="font-size:0.78rem; color:var(--text-muted); line-height:1.45; margin:0;">
+                    <strong style="color:var(--text-main);">Proxy ON</strong> — All stream data flows through your servers. If the Pro Cache Node URL is configured above, the video segments will be safely cached on Container 2's 1TB+ storage!
+                </p>
+            </div>
+            <?php else: ?>
+            <div style="display:flex; gap:10px; align-items:flex-start;">
+                <i class="fas fa-check-circle" style="color:var(--success); margin-top:2px; flex-shrink:0;"></i>
+                <p style="font-size:0.78rem; color:var(--text-muted); line-height:1.45; margin:0;">
+                    <strong style="color:var(--success);">Proxy OFF</strong> — Player is redirected directly to the CDN. Best for Ezyro free hosting as it uses <strong>0 bandwidth</strong> and works instantly without timeouts.
+                </p>
+            </div>
+            <?php endif; ?>
         </div>
-        <?php else: ?>
-        <div style="display:flex; gap:10px; align-items:flex-start;">
-            <i class="fas fa-check-circle" style="color:var(--success); margin-top:2px; flex-shrink:0;"></i>
-            <p style="font-size:0.78rem; color:var(--text-muted); line-height:1.45; margin:0;">
-                <strong style="color:var(--success);">Safe Mode Active (Proxy OFF)</strong> — Player is redirected directly to the CDN. Best for Ezyro free hosting as it uses <strong>0 bandwidth</strong> and works instantly without timeouts.
-            </p>
-        </div>
-        <?php endif; ?>
     </div>
 </div>
 <?php endif; ?>
 
 
 <div style="position: fixed; bottom: 0; left: 0; width: 100%; text-align: center; color: var(--text-muted); font-size: 0.75rem; padding: 12px; font-weight: 500; background: var(--bg); border-top: 1px solid var(--border); z-index: 50;">
-    Crafted with <span style="color: var(--danger);">❤️</span> by <strong style="color: var(--text-main); font-weight: 700;">LazyyXD</strong> &middot; Nexus Premium &middot; V2.0 &middot; <?= date('Y') ?>
+    Nexus Premium V2.0 &middot; Specially Upgraded for Boss <strong style="color: var(--primary); font-weight: 700;">Kobir</strong> &middot; Crafted with <span style="color: var(--danger);">❤️</span> by <strong style="color: var(--text-main); font-weight: 700;">LazyyXD</strong>
 </div>
 
 

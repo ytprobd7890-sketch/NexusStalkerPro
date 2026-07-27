@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 # ==============================================================================
 
 # Configuration
-RAILWAY_PLAYLIST_URL = "https://nexusstalkerpro-production.up.railway.app/playlist.php?token=kobir26tata27"
+RAILWAY_PLAYLIST_URL = "https://your-railway.up.railway.app/playlist.php?token=kobir26tata27"
 MAX_CONCURRENT_THREADS = 50  # Adjust based on your VPS CPU (handles parallel stream warming)
 CHANNEL_WARM_TIMEOUT = 3     # How long to download each stream segment (3 seconds is enough to trigger Railway caching)
 
