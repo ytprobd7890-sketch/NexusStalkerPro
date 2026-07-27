@@ -1,10 +1,21 @@
-FROM python:3.10-slim
+FROM alpine:latest
 
+# Install FFmpeg, Node.js, NPM, and Bash in one fast layer
+RUN apk add --no-cache ffmpeg nodejs npm bash
+
+# Create app directory
 WORKDIR /usr/src/app
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy package.json
+COPY package.json ./
 
-COPY vps_warmer.py ./
+# Copy server code
+COPY server.js ./
 
-CMD [ "python", "-u", "vps_warmer.py" ]
+# Create cache directory and grant absolute write permissions
+RUN mkdir -p cache_segments && chmod -R 777 cache_segments
+
+# Expose default port assigned by Railway
+EXPOSE 8080
+
+CMD [ "node", "server.js" ]
