@@ -1,0 +1,11 @@
+{
+  "name": "pro-cache-node",
+  "version": "2.0.0",
+  "description": "Boss Kobir's High Performance IPTV Cache Node for Railway",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "author": "Boss Kobir",
+  "license": "ISC"
+}
