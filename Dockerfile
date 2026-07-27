@@ -11,9 +11,9 @@ RUN apt-get update && apt-get install -y \
 # Enable Apache rewrite module
 RUN a2enmod rewrite
 
-# Disable conflicting MPMs and force mpm_prefork (Required for Railway's environment)
-RUN a2dismod mpm_event mpm_worker || true
-RUN a2enmod mpm_prefork || true
+# Force-delete conflicting MPM load configurations during build to prevent any accidental double loading
+RUN rm -f /etc/apache2/mods-enabled/mpm_event.load /etc/apache2/mods-enabled/mpm_event.conf || true
+RUN rm -f /etc/apache2/mods-enabled/mpm_worker.load /etc/apache2/mods-enabled/mpm_worker.conf || true
 
 # Copy our optimized php.ini configurations
 COPY optimized.ini /usr/local/etc/php/conf.d/optimized.ini
@@ -40,4 +40,5 @@ RUN sed -i 's/<VirtualHost \*:80>/<VirtualHost *:${PORT}>/g' /etc/apache2/sites-
 # Expose the default Apache port
 EXPOSE 80
 
-CMD ["apache2-foreground"]
+# RUNTIME FIX: Disable event/worker and enable prefork at the exact moment of container launch
+CMD ["/bin/bash", "-c", "a2dismod mpm_event mpm_worker || true && a2enmod mpm_prefork || true && apache2-foreground"]
