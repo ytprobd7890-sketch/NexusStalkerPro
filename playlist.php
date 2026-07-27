@@ -1,11 +1,11 @@
 <?php
 /**
- * Nexus — IPTV M3U Playlist Generator + High-Performance Segment Caching Proxy
+ * Nexus — IPTV M3U Playlist Generator + High-Performance Segment Caching Proxy (XOR Key OFF Edition)
  *
  * GET  /playlist.php?token=TOKEN     → returns full M3U8 playlist
  * GET  /playlist.php?id=78132&token=TOKEN → resolves channel → 302 or proxy
- * GET  /playlist.php?segment=ENC    → proxy and disk-cache a .ts segment (token not needed as XOR-encrypted)
- * GET  /playlist.php?chunks=ENC     → proxy a sub-manifest / key (token not needed as XOR-encrypted)
+ * GET  /playlist.php?segment=ENC    → proxy and disk-cache a .ts segment (token not needed as Base64-encoded)
+ * GET  /playlist.php?chunks=ENC     → proxy a sub-manifest / key (token not needed as Base64-encoded)
  */
 
 require_once __DIR__ . '/StalkerLite.php';
@@ -49,14 +49,6 @@ if (file_exists(EPG_SOURCES_FILE)) {
     if (!is_array($epgSources)) $epgSources = [];
 }
 
-// ─── XOR key — loaded from user account (unique per install) ──────────────────
-function getXorKey(): string {
-    if (!file_exists(USERS_FILE)) { http_response_code(503); die('No user account configured.'); }
-    $d = json_decode(file_get_contents(USERS_FILE), true);
-    if (empty($d['xor_key'])) { http_response_code(503); die('XOR key not found in user account.'); }
-    return $d['xor_key'];
-}
-
 // ─── Load helpers ─────────────────────────────────────────────────────────────
 function loadPortal(): ?array {
     if (!file_exists(PORTAL_FILE)) return null;
@@ -76,28 +68,13 @@ function isProxyActive(): bool {
     return (is_array($d) && ($d['stream_proxy'] ?? 'inactive') === 'active');
 }
 
-// ─── XOR encrypt/decrypt for URL obfuscation ──────────────────────────────────
-function xorEncode(string $data): string {
-    $key = getXorKey();
-    $out = '';
-    for ($i = 0; $i < strlen($data); $i++) {
-        $out .= chr(ord($data[$i]) ^ ord($key[$i % strlen($key)]));
-    }
-    return rtrim(base64_encode($out), '=');
+// ─── Pure, Clean Base64URL encoding/decoding (XOR Key is completely disabled!) ─
+function base64UrlEncode(string $data): string {
+    return rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
 }
 
-function xorDecode(string $encoded): string {
-    $key = getXorKey();
-    // Re-pad base64
-    $mod = strlen($encoded) % 4;
-    if ($mod) $encoded .= str_repeat('=', 4 - $mod);
-    $data = base64_decode($encoded);
-    if ($data === false) return '';
-    $out = '';
-    for ($i = 0; $i < strlen($data); $i++) {
-        $out .= chr(ord($data[$i]) ^ ord($key[$i % strlen($key)]));
-    }
-    return $out;
+function base64UrlDecode(string $encoded): string {
+    return base64_decode(strtr($encoded, '-_', '+/'));
 }
 
 // ─── Stream proxy headers (MAG box user agent) ───────────────────────────────
@@ -151,7 +128,7 @@ $self  = $proto . '://' . $host . ($_SERVER['SCRIPT_NAME'] ?? '/playlist.php');
 // PROXY MODE: Segment streaming & Disk Caching (?segment=ENCRYPTED)
 // ═════════════════════════════════════════════════════════════════════════════
 if (!empty($_GET['segment'])) {
-    $url = xorDecode($_GET['segment']);
+    $url = base64UrlDecode($_GET['segment']);
     if (empty($url) || !filter_var($url, FILTER_VALIDATE_URL)) {
         http_response_code(400);
         die('Invalid segment URL');
@@ -248,11 +225,15 @@ if (!empty($_GET['segment'])) {
 // PROXY MODE: Sub-manifest / key streaming (?chunks=ENCRYPTED)
 // ═════════════════════════════════════════════════════════════════════════════
 if (!empty($_GET['chunks'])) {
-    $url = xorDecode($_GET['chunks']);
+    $url = base64UrlDecode($_GET['chunks']);
     if (empty($url) || !filter_var($url, FILTER_VALIDATE_URL)) {
         http_response_code(400);
         die('Invalid chunk URL');
     }
+
+    // Capture channel name and genre name passed in query parameters
+    $chName = $_GET['ch_name'] ?? 'Unknown';
+    $genre  = $_GET['genre']  ?? 'General';
 
     // Detect if this is a key request
     $requestUri = $_SERVER['REQUEST_URI'] ?? '';
@@ -307,7 +288,7 @@ if (!empty($_GET['chunks'])) {
         exit;
     }
 
-    processAndServeManifest($data, $url, $self);
+    processAndServeManifest($data, $url, $self, $chName, $genre);
     exit;
 }
 
@@ -315,7 +296,7 @@ if (!empty($_GET['chunks'])) {
 // ═════════════════════════════════════════════════════════════════════════════
 // Helper: Process HLS manifest, rewrite URLs through proxy
 // ═════════════════════════════════════════════════════════════════════════════
-function processAndServeManifest(string $data, string $sourceUrl, string $selfUrl): void {
+function processAndServeManifest(string $data, string $sourceUrl, string $selfUrl, string $chName = 'Unknown', string $genre = 'General'): void {
     if (strpos($data, '#EXTM3U') === false && strpos($data, '#EXT-X') === false) {
         header('Location: ' . $sourceUrl);
         exit;
@@ -337,8 +318,8 @@ function processAndServeManifest(string $data, string $sourceUrl, string $selfUr
             // Rewrite key URIs
             if (str_contains($line, 'URI=')) {
                 $fullKeyUrl = resolveRelativeUrl($line, $baseUrl, true);
-                $encrypted  = xorEncode($fullKeyUrl);
-                $newLines[] = '#EXT-X-KEY:METHOD=AES-128,URI="' . $selfUrl . '?chunks=' . urlencode($encrypted) . '"';
+                $encrypted  = base64UrlEncode($fullKeyUrl);
+                $newLines[] = '#EXT-X-KEY:METHOD=AES-128,URI="' . $selfUrl . '?chunks=' . urlencode($encrypted) . '&ch_name=' . urlencode($chName) . '&genre=' . urlencode($genre) . '"';
             } else {
                 $newLines[] = $line;
             }
@@ -347,18 +328,19 @@ function processAndServeManifest(string $data, string $sourceUrl, string $selfUr
 
         // Segment or sub-manifest
         $fullUrl   = resolveRelativeUrl($line, $baseUrl);
-        $encrypted = xorEncode($fullUrl);
+        $encrypted = base64UrlEncode($fullUrl);
 
         if (isSegment($line)) {
             if (!empty($cacheNodeUrl)) {
-                // Route directly to PRO Cache Node (Container 2)
-                $newLines[] = $cacheNodeUrl . '/segment?url=' . urlencode($encrypted);
+                // Route directly to PRO Cache Node (Container 2) with ch_name and genre appended!
+                $newLines[] = $cacheNodeUrl . '/segment?url=' . urlencode($encrypted) . '&ch_name=' . urlencode($chName) . '&genre=' . urlencode($genre);
             } else {
                 // Route to local playlist.php proxy (Container 1)
                 $newLines[] = $selfUrl . '?segment=' . urlencode($encrypted);
             }
         } else {
-            $newLines[] = $selfUrl . '?chunks=' . urlencode($encrypted);
+            // Append ch_name and genre to chunks sub-manifest URL!
+            $newLines[] = $selfUrl . '?chunks=' . urlencode($encrypted) . '&ch_name=' . urlencode($chName) . '&genre=' . urlencode($genre);
         }
     }
 
@@ -452,9 +434,13 @@ if (isset($_GET['id'])) {
 
     // Find channel by ID
     $cmd = '';
+    $chName = 'Unknown';
+    $groupTitle = 'General';
     foreach ($channels['channels'] as $ch) {
         if (($ch['id'] ?? '') === $channelId) {
             $cmd = $ch['cmd'] ?? '';
+            $chName = $ch['name'] ?? 'Unknown';
+            $groupTitle = $ch['genre_name'] ?? 'General';
             break;
         }
     }
@@ -512,7 +498,7 @@ if (isset($_GET['id'])) {
             curl_close($ch);
 
             if ($code === 200 && !empty($data)) {
-                processAndServeManifest($data, $streamUrl, $self);
+                processAndServeManifest($data, $streamUrl, $self, $chName, $groupTitle);
             } else {
                 header('Location: ' . $streamUrl, true, 302);
             }

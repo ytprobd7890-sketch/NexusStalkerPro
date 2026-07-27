@@ -4,31 +4,39 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const url = require('url');
+const os = require('os');
 
 // Load environment variables with safe defaults
 const PORT = process.env.PORT || 8080;
-const XOR_KEY = process.env.XOR_KEY || "default_nexus_secure_xor_key_64_chars_long_etc_etc_etc_etc_etc_etc_";
 const CACHE_DIR = path.join(__dirname, 'cache_segments');
+
+// Dynamic Telemetry Counters
+let totalRequestsServed = 0;
+let activeStreamsCount = 0;
 
 // Ensure cache directory exists
 if (!fs.existsSync(CACHE_DIR)) {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
 }
 
-// XOR decryption function matching PHP's xorDecode
-function xorDecode(encoded) {
+// Clean Base64URL Decoding (XOR Key is fully disabled for maximum simplicity!)
+function base64UrlDecode(encoded) {
     try {
-        let base64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
-        while (base64.length % 4) base64 += '=';
-        const data = Buffer.from(base64, 'base64');
-        let out = '';
-        for (let i = 0; i < data.length; i++) {
-            out += String.fromCharCode(data[i] ^ XOR_KEY.charCodeAt(i % XOR_KEY.length));
-        }
-        return out;
+        let b64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
+        while (b64.length % 4) b64 += '=';
+        return Buffer.from(b64, 'base64').toString('utf8');
     } catch (e) {
         return '';
     }
+}
+
+// Helper to format uptime into human-readable format (HH:MM:SS)
+function formatUptime(seconds) {
+    const d = Math.floor(seconds / (3600 * 24));
+    const h = Math.floor((seconds % (3600 * 24)) / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    return `${d}d, ${h}h, ${m}m, ${s}s`;
 }
 
 // MAG Box stream headers
@@ -40,6 +48,14 @@ const STREAM_HEADERS = {
 
 // High-performance async request handler
 const server = http.createServer((req, res) => {
+    totalRequestsServed++;
+    activeStreamsCount++;
+
+    // Track active connection closure
+    req.on('close', () => {
+        activeStreamsCount = Math.max(0, activeStreamsCount - 1);
+    });
+
     // Enable CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -63,7 +79,7 @@ const server = http.createServer((req, res) => {
             return;
         }
 
-        const targetUrl = xorDecode(encryptedUrl);
+        const targetUrl = base64UrlDecode(encryptedUrl);
         if (!targetUrl || !targetUrl.startsWith('http')) {
             res.writeHead(400, { 'Content-Type': 'text/plain' });
             res.end('Invalid or corrupted segment URL');
@@ -157,16 +173,58 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    // Default route: Health Check
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-        status: "active",
-        service: "Pro Cache Node",
-        timezone: "Asia/Dhaka",
-        uptime: process.uptime()
-    }));
+    // Default route: High-Tech Enterprise Health Monitoring JSON (10+ Infos!)
+    if (pathname === '/' || pathname === '/info') {
+        let cachedFilesCount = 0;
+        try {
+            cachedFilesCount = fs.readdirSync(CACHE_DIR).length;
+        } catch (e) {
+            cachedFilesCount = 0;
+        }
+
+        const mem = process.memoryUsage();
+        const uptimeSecs = process.uptime();
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            // 1. General Service Info
+            status: "active",
+            service_name: "Boss Kobir's Pro Cache Node",
+            version: "2.5.0-Stable",
+            owner: "Boss Kobir",
+            
+            // 2. Active Telemetry & Analytics
+            active_connections: Math.max(0, activeStreamsCount - 1), // Exclude the current check connection
+            total_requests_served: totalRequestsServed,
+            cached_segments_on_disk: cachedFilesCount,
+            
+            // 3. System Environment
+            node_version: process.version,
+            platform: process.platform,
+            architecture: process.arch,
+            cpu_cores: os.cpus().length,
+            
+            // 4. Memory Resource Management (RSS, Heap, System)
+            process_memory_rss: Math.round(mem.rss / 1024 / 1024) + ' MB',
+            process_memory_heap_total: Math.round(mem.heapTotal / 1024 / 1024) + ' MB',
+            process_memory_heap_used: Math.round(mem.heapUsed / 1024 / 1024) + ' MB',
+            system_total_memory: (os.totalmem() / 1024 / 1024 / 1024).toFixed(2) + ' GB',
+            system_free_memory: (os.freemem() / 1024 / 1024 / 1024).toFixed(2) + ' GB',
+            
+            // 5. Time & Location Settings
+            timezone: "Asia/Dhaka",
+            system_time_now: new Date().toLocaleString("en-US", { timeZone: "Asia/Dhaka" }),
+            uptime_seconds: Math.floor(uptimeSecs),
+            uptime_formatted: formatUptime(uptimeSecs)
+        }, null, 2));
+        return;
+    }
+
+    // Fallback 404
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not Found');
 });
 
 server.listen(PORT, () => {
-    console.log(`🚀 Boss Kobir's Pro Cache Node listening on Port ${PORT}`);
+    console.log(`🚀 Boss Kobir's Pro Cache Node (XOR-OFF) listening on Port ${PORT}`);
 });
