@@ -1,11 +1,11 @@
 <?php
 /**
- * Nexus — IPTV M3U Playlist Generator + Stream Proxy (Secure, Filtered & Boss Kobir Upgraded)
+ * Nexus — IPTV M3U Playlist Generator + High-Performance Segment Caching Proxy
  *
  * GET  /playlist.php?token=TOKEN     → returns full M3U8 playlist
  * GET  /playlist.php?id=78132&token=TOKEN → resolves channel → 302 or proxy
- * GET  /playlist.php?segment=ENC    → proxy a .ts segment (token not needed as XOR-encoded)
- * GET  /playlist.php?chunks=ENC     → proxy a sub-manifest / key (token not needed as XOR-encoded)
+ * GET  /playlist.php?segment=ENC    → proxy and disk-cache a .ts segment (token not needed as XOR-encrypted)
+ * GET  /playlist.php?chunks=ENC     → proxy a sub-manifest / key (token not needed as XOR-encrypted)
  */
 
 require_once __DIR__ . '/StalkerLite.php';
@@ -148,8 +148,7 @@ $self  = $proto . '://' . $host . ($_SERVER['SCRIPT_NAME'] ?? '/playlist.php');
 
 
 // ═════════════════════════════════════════════════════════════════════════════
-// PROXY MODE: Segment streaming (?segment=ENCRYPTED)
-// Streams a .ts segment through the server — no buffering
+// PROXY MODE: Segment streaming & Disk Caching (?segment=ENCRYPTED)
 // ═════════════════════════════════════════════════════════════════════════════
 if (!empty($_GET['segment'])) {
     $url = xorDecode($_GET['segment']);
@@ -167,7 +166,27 @@ if (!empty($_GET['segment'])) {
     while (ob_get_level()) ob_end_flush();
     ini_set('zlib.output_compression', 'Off');
 
+    $cacheDir = __DIR__ . '/data/cache_segments';
+    $cacheFile = $cacheDir . '/' . md5($url) . '.ts';
+
+    // Ensure segment cache directory exists
+    if (!file_exists($cacheDir)) {
+        @mkdir($cacheDir, 0777, true);
+    }
+
+    // Check if segment is already cached on disk (Cache HIT)
+    if (file_exists($cacheFile) && filesize($cacheFile) > 0) {
+        header('X-Cache-Status: HIT');
+        header('Content-Length: ' . filesize($cacheFile));
+        readfile($cacheFile);
+        exit;
+    }
+
+    // Cache MISS: Fetch from portal CDN and write to both client and disk
+    header('X-Cache-Status: MISS');
+    $fp = @fopen($cacheFile, 'w');
     $headersSent = false;
+
     $ch = curl_init();
     curl_setopt_array($ch, [
         CURLOPT_URL            => $url,
@@ -186,22 +205,44 @@ if (!empty($_GET['segment'])) {
             }
             return strlen($header);
         },
-        CURLOPT_WRITEFUNCTION  => function($ch, $data) use (&$headersSent) {
+        CURLOPT_WRITEFUNCTION  => function($ch, $data) use (&$headersSent, $fp) {
             if (!$headersSent) {
                 $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
                 if ($httpCode !== 200 && $httpCode !== 0) return 0;
                 $headersSent = true;
             }
+            // Stream immediately to player
             echo $data;
             flush();
+            // Cache chunk to 1TB storage
+            if ($fp) {
+                fwrite($fp, $data);
+            }
             return strlen($data);
         },
     ]);
     $result = curl_exec($ch);
     curl_close($ch);
+    if ($fp) {
+        fclose($fp);
+    }
+
     if (!$result && !$headersSent) {
+        @unlink($cacheFile); // Clean up corrupted cache file
         http_response_code(502);
         echo 'Segment fetch failed';
+    }
+
+    // Active Sliding-Window Garbage Collection:
+    // 1% of segment requests triggers automated cleaning of segments older than 180s (3 minutes)
+    if (random_int(1, 100) === 1) {
+        $files = glob($cacheDir . '/*.ts');
+        $now = time();
+        foreach ($files as $file) {
+            if (is_file($file) && ($now - filemtime($file)) > 180) {
+                @unlink($file);
+            }
+        }
     }
     exit;
 }
