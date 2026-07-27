@@ -1,6 +1,6 @@
 <?php
 /**
- * StalkerLite — Minimal Stalker Portal Engine
+ * StalkerLite — Minimal Stalker Portal Engine (Upgraded with Proxy Support)
  * Handshake · Profile · Channels · Stream Resolution
  * No database · No proxy · Pure PHP + cURL
  */
@@ -15,6 +15,7 @@ class StalkerLite {
     private array  $headers;
     private string $token;
     private bool   $tokenVerified = false;
+    private string $proxy = ''; // Added proxy property
 
     // ─── Constructor ───────────────────────────────────────────────────────────
     // $existingToken: pass a cached token to skip handshake entirely
@@ -28,6 +29,7 @@ class StalkerLite {
         $this->mac   = strtoupper(trim($mac));
         $this->model = $model ?: 'MAG250';
         $this->token = $existingToken;
+        $this->proxy = $extras['proxy'] ?? ''; // Load proxy from extras
 
         $clean            = $this->sanitizeUrl($url);
         $this->serverUrl  = $this->buildServerUrl($clean);
@@ -72,7 +74,8 @@ class StalkerLite {
             'deviceId'  => $deviceId,
             'deviceId2' => $deviceId2,
             'signature' => $signature,
-            'model'     => $this->model
+            'model'     => $this->model,
+            'proxy'     => $this->proxy // Store proxy in device info as well
         ];
     }
 
@@ -95,10 +98,10 @@ class StalkerLite {
         return $h;
     }
 
-    // ─── cURL ──────────────────────────────────────────────────────────────────
+    // ─── cURL (Updated with Proxy Support) ──────────────────────────────────────
     public function curlGet(string $url, array $headers = [], int $timeout = 20): array {
         $ch = curl_init();
-        curl_setopt_array($ch, [
+        $opts = [
             CURLOPT_URL            => $url,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_HTTPHEADER     => $headers ?: $this->authHeaders(),
@@ -110,7 +113,14 @@ class StalkerLite {
             CURLOPT_SSL_VERIFYHOST => false,
             CURLOPT_ENCODING       => '',
             CURLOPT_USERAGENT      => 'Mozilla/5.0 (QtEmbedded; U; Linux; C)',
-        ]);
+        ];
+
+        // Apply Proxy if configured
+        if (!empty($this->proxy)) {
+            $opts[CURLOPT_PROXY] = $this->proxy;
+        }
+
+        curl_setopt_array($ch, $opts);
         $body  = curl_exec($ch);
         $code  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $error = curl_error($ch);
@@ -314,13 +324,11 @@ class StalkerLite {
         } elseif (isset($data['data']) && is_array($data['data'])) {
             $raw = $data['data'];
         } elseif (isset($data['js']) && is_array($data['js'])) {
-            // Check if 'js' itself is the channel list or if it's an object with channel keys
             $first = reset($data['js']);
             if (is_array($first)) {
                 if (isset($first['name']) || isset($first['cmd'])) {
                     $raw = $data['js'];
                 } else {
-                    // Try to find any child that is a list of channels
                     foreach ($data['js'] as $val) {
                         if (is_array($val) && (isset($val[0]['name']) || isset($val[0]['cmd']))) {
                             $raw = $val;
@@ -382,11 +390,9 @@ class StalkerLite {
 
             $all = array_merge($all, $list);
 
-            // Check if we've fetched all
             $total = (int)($data['js']['total_items'] ?? $data['js']['max_page_items'] ?? 0);
             if ($total > 0 && count($all) >= $total) break;
 
-            // Safety: max 100 pages (50,000 channels)
             $page++;
             if ($page > 100) break;
         }
@@ -399,17 +405,13 @@ class StalkerLite {
     public function createLink(string $cmd): string {
         $cmd = trim($cmd);
 
-        // Strip ffmpeg prefix
         if (stripos($cmd, 'ffmpeg ') === 0) $cmd = trim(substr($cmd, 7));
 
-        // If already direct HTTP (not ffrt), return as-is
         if (preg_match('#^https?://#i', $cmd) && stripos($cmd, 'ffrt') !== 0) {
-            // Extract clean URL (strip trailing junk)
             if (preg_match('#(https?://[^\s"\']+)#i', $cmd, $m)) return $m[1];
             return $cmd;
         }
 
-        // Call create_link API
         $url = $this->serverUrl . '?' . http_build_query([
             'type'           => 'itv',
             'action'         => 'create_link',
@@ -434,7 +436,6 @@ class StalkerLite {
     private function buildLogoUrl(string $logo): string {
         if (empty($logo)) return '';
         if (preg_match('#^https?://#i', $logo)) return $logo;
-        // Convert 'filename.jpg' to full URL '(portal)/misc/logos/320/filename.jpg'
         $base = rtrim(str_replace('/server/load.php', '', $this->serverUrl), '/');
         return $base . '/misc/logos/320/' . ltrim($logo, '/');
     }
