@@ -11,7 +11,7 @@ const os = require('os');
 // ==============================================================================
 // This server actively and continuously pulls, copies, and caches live video
 // segments (.ts files) of all 4,000 channels 24/7 to local storage!
-// It runs independently without needing any external VPS or warming clients.
+// It dynamically generates an M3U playlist of ONLY the active cached channels!
 // ==============================================================================
 
 const PORT = process.env.PORT || 8080;
@@ -25,7 +25,7 @@ const SEGMENT_TIMEOUT = 5000; // 5s timeout
 // Telemetry Analytics
 let totalRequestsServed = 0;
 let totalSegmentsCached24_7 = 0;
-const cachedChannelsMap = new Map(); // ch_name -> last_active_at
+const cachedChannelsMap = new Map(); // ch_name -> { id, name, genre, last_cached_at, timestamp }
 const cachedGenresMap = {};          // genre -> count
 
 // Ensure cache directory exists
@@ -83,6 +83,10 @@ function fetchUrl(targetUrl, headers = {}) {
 // Active 24/7 Channel Segment Harvester Worker
 async function harvestChannelSegment(channelM3u8Url) {
     try {
+        // Extract channel ID from the URL (e.g. ?id=11070)
+        const parsedUrl = url.parse(channelM3u8Url, true);
+        const chId = parsedUrl.query.id || '0';
+
         // Step 1: Fetch the .m3u8 manifest from Railway (Container 1)
         const m3u8Res = await fetchUrl(channelM3u8Url);
         if (m3u8Res.statusCode !== 200) return;
@@ -113,7 +117,15 @@ async function harvestChannelSegment(channelM3u8Url) {
 
         // Check if segment is already cached
         if (fs.existsSync(cacheFilePath)) {
-            return; // Already cached!
+            // Keep channel warm in telemetry
+            cachedChannelsMap.set(chName, {
+                id: chId,
+                name: chName,
+                genre: genre,
+                last_cached_at: new Date().toLocaleString("en-US", { timeZone: "Asia/Dhaka" }),
+                timestamp: Date.now()
+            });
+            return; 
         }
 
         // Step 3: Fetch raw .ts segment and write directly to 1TB local SSD
@@ -139,7 +151,13 @@ async function harvestChannelSegment(channelM3u8Url) {
                 res.on('end', () => {
                     writer.close();
                     totalSegmentsCached24_7++;
-                    cachedChannelsMap.set(chName, new Date().toLocaleString("en-US", { timeZone: "Asia/Dhaka" }));
+                    cachedChannelsMap.set(chName, {
+                        id: chId,
+                        name: chName,
+                        genre: genre,
+                        last_cached_at: new Date().toLocaleString("en-US", { timeZone: "Asia/Dhaka" }),
+                        timestamp: Date.now()
+                    });
                     if (!cachedGenresMap[genre]) cachedGenresMap[genre] = 0;
                     cachedGenresMap[genre]++;
                     resolve();
@@ -151,7 +169,7 @@ async function harvestChannelSegment(channelM3u8Url) {
         });
 
     } catch (e) {
-        // Fail silently and continue the loop
+        // Fail silently
     }
 }
 
@@ -163,7 +181,7 @@ async function runActiveHarvesterLoop() {
         m3uRes = await fetchUrl(RAILWAY_PLAYLIST_URL);
     } catch (err) {
         console.error("[Harvester Error] Failed to contact Railway manager:", err.message);
-        setTimeout(runActiveHarvesterLoop, 15000); // Retry in 15 seconds
+        setTimeout(runActiveHarvesterLoop, 15000); 
         return;
     }
 
@@ -178,13 +196,12 @@ async function runActiveHarvesterLoop() {
     for (let line of lines) {
         line = line.trim();
         if (line && line.startsWith('http')) {
-            channelUrls.append ? channelUrls.append(line) : channelUrls.push(line);
+            channelUrls.push(line);
         }
     }
 
     console.log(`[Harvester] Successfully indexed ${channelUrls.length} channels. Starting parallel 24/7 harvesting cycle...`);
 
-    // Helper to run workers with limited concurrency (MAX_CONCURRENT_HARVESTERS)
     let index = 0;
     async function worker() {
         while (index < channelUrls.length) {
@@ -215,6 +232,14 @@ async function runActiveHarvesterLoop() {
         });
     } catch (e) {}
 
+    // Auto-clean channels from memory list if not active for 10 minutes (600,000 ms)
+    const now = Date.now();
+    cachedChannelsMap.forEach((val, key) => {
+        if (now - val.timestamp > 600000) {
+            cachedChannelsMap.delete(key);
+        }
+    });
+
     setTimeout(runActiveHarvesterLoop, 2000);
 }
 
@@ -226,6 +251,8 @@ setTimeout(runActiveHarvesterLoop, 5000);
 // HTTP API & Caching Proxy Server
 // ==============================================================================
 const server = http.createServer((req, res) => {
+    totalRequestsServed++;
+
     // Enable CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -318,7 +345,76 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    // Route 2: Real-time 24/7 Telemetry Dashboard
+    // Route 2: [NEW & PRO] Dynamic M3U Playlist of ONLY currently active cached channels!
+    if (pathname === '/playlist.m3u' || pathname === '/playlist') {
+        const proto = ((!empty(req.headers['x-forwarded-proto']) && req.headers['x-forwarded-proto'] === 'https') || req.connection.encrypted) ? 'https' : 'http';
+        const hostHeader = req.headers.host || 'localhost';
+        const selfBase = `${proto}://${hostHeader}`;
+
+        let m3uLines = [];
+        m3uLines.push('#EXTM3U x-tvg-url="https://avkb.short.gy/epg.xml.gz" url-tvg="https://avkb.short.gy/epg.xml.gz"');
+        m3uLines.push('#');
+        m3uLines.push('#  Nexus Premium — 24/7 Cached Channels Playlist');
+        m3uLines.push('#  Owner    : Boss Kobir');
+        m3uLines.push(`#  Uptime   : ${formatUptime(process.uptime())}`);
+        m3uLines.push(`#  Channels : ${cachedChannelsMap.size}`);
+        m3uLines.push('#');
+        m3uLines.push('');
+
+        cachedChannelsMap.forEach((val) => {
+            // Build direct local stream URL to point to this cache node's local files
+            const streamUrl = `${selfBase}/stream/ch_${val.id}.m3u8`;
+            m3uLines.push(`#EXTINF:-1 tvg-id="${val.id}" tvg-name="${val.name}" group-title="${val.genre}",${val.name}`);
+            m3uLines.push(streamUrl);
+        });
+
+        res.writeHead(200, {
+            'Content-Type': 'application/x-mpegurl; charset=utf-8',
+            'Content-Disposition': 'inline; filename="Cached_KobirTV.m3u"',
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Access-Control-Allow-Origin': '*'
+        });
+        res.end(m3uLines.join('\n'));
+        return;
+    }
+
+    // Helper for empty check
+    function empty(val) {
+        return !val;
+    }
+
+    // Route 3: Serve the active segment/manifest files (/stream/ch_720.m3u8)
+    if (pathname.startsWith('/stream/')) {
+        const fileName = pathname.replace('/stream/', '');
+        if (fileName.includes('..') || fileName.includes('/') || fileName.includes('\\')) {
+            res.writeHead(403, { 'Content-Type': 'text/plain' });
+            res.end('Access Forbidden');
+            return;
+        }
+
+        const filePath = path.join(CACHE_DIR, fileName);
+
+        // If requested file is a manifest and it's not present (cold start), return 404
+        if (!fs.existsSync(filePath)) {
+            res.writeHead(404, { 'Content-Type': 'text/plain' });
+            res.end('File Not Found');
+            return;
+        }
+
+        const ext = path.extname(fileName);
+        const contentType = ext === '.m3u8' ? 'application/vnd.apple.mpegurl' : 'video/mp2t';
+
+        res.writeHead(200, {
+            'Content-Type': contentType,
+            'Cache-Control': 'no-cache',
+            'Access-Control-Allow-Origin': '*'
+        });
+
+        fs.createReadStream(filePath).pipe(res);
+        return;
+    }
+
+    // Route 4: Real-time 24/7 Telemetry Dashboard
     if (pathname === '/' || pathname === '/info') {
         let cachedFilesCount = 0;
         try {
