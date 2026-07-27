@@ -6,20 +6,34 @@ const crypto = require('crypto');
 const url = require('url');
 const os = require('os');
 
-// Load environment variables with safe defaults
+// ==============================================================================
+// Boss Kobir - High-Performance 24/7 Active Node.js Stream Harvester & Cache Node
+// ==============================================================================
+// This server actively and continuously pulls, copies, and caches live video
+// segments (.ts files) of all 4,000 channels 24/7 to local storage!
+// It runs independently without needing any external VPS or warming clients.
+// ==============================================================================
+
 const PORT = process.env.PORT || 8080;
 const CACHE_DIR = path.join(__dirname, 'cache_segments');
 
-// Dynamic Telemetry Counters
+// Configuration
+const RAILWAY_PLAYLIST_URL = process.env.RAILWAY_PLAYLIST_URL || "https://tatatv.kobir26.qzz.io/playlist.php?token=kobir26tata27";
+const MAX_CONCURRENT_HARVESTERS = parseInt(process.env.MAX_CONCURRENT_HARVESTERS || "40"); // Safe for 1GB RAM / 2 vCPUs
+const SEGMENT_TIMEOUT = 5000; // 5s timeout
+
+// Telemetry Analytics
 let totalRequestsServed = 0;
-let activeStreamsCount = 0;
+let totalSegmentsCached24_7 = 0;
+const cachedChannelsMap = new Map(); // ch_name -> last_active_at
+const cachedGenresMap = {};          // genre -> count
 
 // Ensure cache directory exists
 if (!fs.existsSync(CACHE_DIR)) {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
 }
 
-// Clean Base64URL Decoding (XOR Key is fully disabled for maximum simplicity!)
+// Clean Base64URL Decoding (XOR Key is fully disabled)
 function base64UrlDecode(encoded) {
     try {
         let b64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
@@ -30,7 +44,7 @@ function base64UrlDecode(encoded) {
     }
 }
 
-// Helper to format uptime into human-readable format (HH:MM:SS)
+// Helper to format uptime into human-readable format
 function formatUptime(seconds) {
     const d = Math.floor(seconds / (3600 * 24));
     const h = Math.floor((seconds % (3600 * 24)) / 3600);
@@ -46,16 +60,172 @@ const STREAM_HEADERS = {
     'Connection': 'keep-alive'
 };
 
-// High-performance async request handler
-const server = http.createServer((req, res) => {
-    totalRequestsServed++;
-    activeStreamsCount++;
-
-    // Track active connection closure
-    req.on('close', () => {
-        activeStreamsCount = Math.max(0, activeStreamsCount - 1);
+// Generic HTTP/HTTPS Fetch Helper
+function fetchUrl(targetUrl, headers = {}) {
+    return new Promise((resolve, reject) => {
+        const parsed = url.parse(targetUrl);
+        const client = parsed.protocol === 'https:' ? https : http;
+        const options = {
+            hostname: parsed.hostname,
+            port: parsed.port,
+            path: parsed.path,
+            method: 'GET',
+            headers: { ...STREAM_HEADERS, ...headers }
+        };
+        client.request(options, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => resolve({ data, statusCode: res.statusCode, headers: res.headers }));
+        }).on('error', reject).end();
     });
+}
 
+// Active 24/7 Channel Segment Harvester Worker
+async function harvestChannelSegment(channelM3u8Url) {
+    try {
+        // Step 1: Fetch the .m3u8 manifest from Railway (Container 1)
+        const m3u8Res = await fetchUrl(channelM3u8Url);
+        if (m3u8Res.statusCode !== 200) return;
+
+        // Step 2: Parse to find the target .ts segment URL
+        const lines = m3u8Res.data.split('\n');
+        let segmentUrl = '';
+        for (let line of lines) {
+            line = line.trim();
+            if (line && line.startsWith('http')) {
+                segmentUrl = line;
+                break;
+            }
+        }
+
+        if (!segmentUrl) return;
+
+        // Extract metadata if available in query params
+        const parsedSeg = url.parse(segmentUrl, true);
+        const chName = parsedSeg.query.ch_name || 'Unknown';
+        const genre = parsedSeg.query.genre || 'General';
+        const rawTargetUrl = base64UrlDecode(parsedSeg.query.url);
+
+        if (!rawTargetUrl) return;
+
+        const urlHash = crypto.createHash('md5').update(rawTargetUrl).digest('hex');
+        const cacheFilePath = path.join(CACHE_DIR, `${urlHash}.ts`);
+
+        // Check if segment is already cached
+        if (fs.existsSync(cacheFilePath)) {
+            return; // Already cached!
+        }
+
+        // Step 3: Fetch raw .ts segment and write directly to 1TB local SSD
+        const parsedTarget = url.parse(rawTargetUrl);
+        const client = parsedTarget.protocol === 'https:' ? https : http;
+        
+        const options = {
+            hostname: parsedTarget.hostname,
+            port: parsedTarget.port,
+            path: parsedTarget.path,
+            method: 'GET',
+            headers: STREAM_HEADERS
+        };
+
+        await new Promise((resolve, reject) => {
+            const req = client.request(options, (res) => {
+                if (res.statusCode !== 200) {
+                    reject(new Error(`CDN status: ${res.statusCode}`));
+                    return;
+                }
+                const writer = fs.createWriteStream(cacheFilePath);
+                res.pipe(writer);
+                res.on('end', () => {
+                    writer.close();
+                    totalSegmentsCached24_7++;
+                    cachedChannelsMap.set(chName, new Date().toLocaleString("en-US", { timeZone: "Asia/Dhaka" }));
+                    if (!cachedGenresMap[genre]) cachedGenresMap[genre] = 0;
+                    cachedGenresMap[genre]++;
+                    resolve();
+                });
+                res.on('error', reject);
+            });
+            req.on('error', reject);
+            req.end();
+        });
+
+    } catch (e) {
+        // Fail silently and continue the loop
+    }
+}
+
+// Main 24/7 Active Harvester Loop
+async function runActiveHarvesterLoop() {
+    console.log("[Harvester] Querying master M3U playlist from Railway to index channels...");
+    let m3uRes;
+    try {
+        m3uRes = await fetchUrl(RAILWAY_PLAYLIST_URL);
+    } catch (err) {
+        console.error("[Harvester Error] Failed to contact Railway manager:", err.message);
+        setTimeout(runActiveHarvesterLoop, 15000); // Retry in 15 seconds
+        return;
+    }
+
+    if (m3uRes.statusCode !== 200) {
+        console.error(`[Harvester Error] Railway manager returned status: ${m3uRes.statusCode}`);
+        setTimeout(runActiveHarvesterLoop, 15000);
+        return;
+    }
+
+    const lines = m3uRes.data.split('\n');
+    const channelUrls = [];
+    for (let line of lines) {
+        line = line.trim();
+        if (line && line.startsWith('http')) {
+            channelUrls.append ? channelUrls.append(line) : channelUrls.push(line);
+        }
+    }
+
+    console.log(`[Harvester] Successfully indexed ${channelUrls.length} channels. Starting parallel 24/7 harvesting cycle...`);
+
+    // Helper to run workers with limited concurrency (MAX_CONCURRENT_HARVESTERS)
+    let index = 0;
+    async function worker() {
+        while (index < channelUrls.length) {
+            const url = channelUrls[index++];
+            await harvestChannelSegment(url);
+        }
+    }
+
+    // Launch parallel workers
+    const workers = [];
+    for (let i = 0; i < Math.min(MAX_CONCURRENT_HARVESTERS, channelUrls.length); i++) {
+        workers.push(worker());
+    }
+    await Promise.all(workers);
+
+    console.log(`[Harvester] Completed 1 full active 24/7 harvesting cycle. Starting next cycle in 2 seconds...`);
+    
+    // Auto-clean segments older than 5 minutes to prevent clogging up disk
+    try {
+        const files = fs.readdirSync(CACHE_DIR);
+        const now = Date.now();
+        files.forEach(file => {
+            const filePath = path.join(CACHE_DIR, file);
+            const stats = fs.statSync(filePath);
+            if (now - stats.mtimeMs > 300000) { // 5 minutes
+                fs.unlinkSync(filePath);
+            }
+        });
+    } catch (e) {}
+
+    setTimeout(runActiveHarvesterLoop, 2000);
+}
+
+// Start Background Harvester Loop immediately on server boot!
+setTimeout(runActiveHarvesterLoop, 5000);
+
+
+// ==============================================================================
+// HTTP API & Caching Proxy Server
+// ==============================================================================
+const server = http.createServer((req, res) => {
     // Enable CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -70,7 +240,7 @@ const server = http.createServer((req, res) => {
     const parsedUrl = url.parse(req.url, true);
     const pathname = parsedUrl.pathname;
 
-    // Route 1: Segment streaming and active caching (/segment?url=ENCRYPTED_XOR_URL)
+    // Route 1: Serve segments directly from the 24/7 Active cache (Ultra fast!)
     if (pathname === '/segment') {
         const encryptedUrl = parsedUrl.query.url;
         if (!encryptedUrl) {
@@ -82,7 +252,7 @@ const server = http.createServer((req, res) => {
         const targetUrl = base64UrlDecode(encryptedUrl);
         if (!targetUrl || !targetUrl.startsWith('http')) {
             res.writeHead(400, { 'Content-Type': 'text/plain' });
-            res.end('Invalid or corrupted segment URL');
+            res.end('Invalid segment URL');
             return;
         }
 
@@ -102,7 +272,7 @@ const server = http.createServer((req, res) => {
             return;
         }
 
-        // Cache MISS: Fetch from Portal CDN, pipe to client, and write to 1TB disk simultaneously
+        // Cache MISS (Fallback): Fetch from Portal CDN, pipe, and cache simultaneously
         const parsedTarget = url.parse(targetUrl);
         const client = parsedTarget.protocol === 'https:' ? https : http;
         
@@ -123,23 +293,17 @@ const server = http.createServer((req, res) => {
 
             res.writeHead(200, {
                 'Content-Type': 'video/mp2t',
-                'X-Cache-Status': 'MISS',
+                'X-Cache-Status': 'MISS_FALLBACK',
                 'Cache-Control': 'no-cache',
                 'X-Accel-Buffering': 'no'
             });
 
-            // Open write stream for caching
             const cacheWriter = fs.createWriteStream(cacheFilePath);
-            
-            // Pipe stream to both client and cache file
             cRes.pipe(res);
             cRes.pipe(cacheWriter);
 
-            cRes.on('end', () => {
-                cacheWriter.close();
-            });
-
-            cRes.on('error', (err) => {
+            cRes.on('end', () => cacheWriter.close());
+            cRes.on('error', () => {
                 cacheWriter.close();
                 fs.unlink(cacheFilePath, () => {});
             });
@@ -148,32 +312,13 @@ const server = http.createServer((req, res) => {
         cReq.on('error', (err) => {
             res.writeHead(502, { 'Content-Type': 'text/plain' });
             res.end(`Failed to fetch segment: ${err.message}`);
-            fs.unlink(cacheFilePath, () => {});
         });
 
         cReq.end();
-
-        // High-Performance Sliding Window Garbage Collection:
-        // Automatically clean up segments older than 5 minutes (300 seconds) to keep the cache clean
-        if (Math.random() < 0.05) { // 5% chance per request
-            fs.readdir(CACHE_DIR, (err, files) => {
-                if (err) return;
-                const now = Date.now();
-                files.forEach(file => {
-                    const filePath = path.join(CACHE_DIR, file);
-                    fs.stat(filePath, (err, stats) => {
-                        if (err) return;
-                        if (now - stats.mtimeMs > 300000) { // 300,000 ms = 5 mins
-                            fs.unlink(filePath, () => {});
-                        }
-                    });
-                });
-            });
-        }
         return;
     }
 
-    // Default route: High-Tech Enterprise Health Monitoring JSON (10+ Infos!)
+    // Route 2: Real-time 24/7 Telemetry Dashboard
     if (pathname === '/' || pathname === '/info') {
         let cachedFilesCount = 0;
         try {
@@ -187,44 +332,42 @@ const server = http.createServer((req, res) => {
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
-            // 1. General Service Info
             status: "active",
-            service_name: "Boss Kobir's Pro Cache Node",
-            version: "2.5.0-Stable",
+            service_name: "Boss Kobir's Pro 24/7 Active Cache Node",
+            version: "3.5.0-ActiveEdition",
             owner: "Boss Kobir",
+            caching_mode: "AUTOMATED_24_7_ACTIVE_PULL (No-VPS Required)",
             
-            // 2. Active Telemetry & Analytics
-            active_connections: Math.max(0, activeStreamsCount - 1), // Exclude the current check connection
-            total_requests_served: totalRequestsServed,
-            cached_segments_on_disk: cachedFilesCount,
+            // Telemetry Analytics
+            total_unique_channels_monitored: cachedChannelsMap.size,
+            total_active_segments_on_disk: cachedFilesCount,
+            total_segments_actively_cached_24_7: totalSegmentsCached24_7,
             
-            // 3. System Environment
+            // Memory & System specs
             node_version: process.version,
             platform: process.platform,
             architecture: process.arch,
             cpu_cores: os.cpus().length,
-            
-            // 4. Memory Resource Management (RSS, Heap, System)
             process_memory_rss: Math.round(mem.rss / 1024 / 1024) + ' MB',
-            process_memory_heap_total: Math.round(mem.heapTotal / 1024 / 1024) + ' MB',
-            process_memory_heap_used: Math.round(mem.heapUsed / 1024 / 1024) + ' MB',
             system_total_memory: (os.totalmem() / 1024 / 1024 / 1024).toFixed(2) + ' GB',
             system_free_memory: (os.freemem() / 1024 / 1024 / 1024).toFixed(2) + ' GB',
             
-            // 5. Time & Location Settings
+            // Location and time settings
             timezone: "Asia/Dhaka",
             system_time_now: new Date().toLocaleString("en-US", { timeZone: "Asia/Dhaka" }),
-            uptime_seconds: Math.floor(uptimeSecs),
-            uptime_formatted: formatUptime(uptimeSecs)
+            uptime_formatted: formatUptime(uptimeSecs),
+            
+            // Channels and Genres Details
+            cached_channels_last_active_list: Object.fromEntries(cachedChannelsMap),
+            cached_segments_served_by_genre: cachedGenresMap
         }, null, 2));
         return;
     }
 
-    // Fallback 404
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('Not Found');
 });
 
 server.listen(PORT, () => {
-    console.log(`🚀 Boss Kobir's Pro Cache Node (XOR-OFF) listening on Port ${PORT}`);
+    console.log(`🚀 Boss Kobir's Pro 24/7 Active Cache Node listening on Port ${PORT}`);
 });
