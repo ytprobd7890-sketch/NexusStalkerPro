@@ -66,7 +66,9 @@ For ultra-fast, zero-buffering playback, deploy this Nginx configuration on your
 2. Paste it inside `/etc/nginx/sites-available/default` on your VPS.
 3. Restart Nginx: `sudo systemctl restart nginx`.
 
+
 ---
+
 
 ## 🔒 Security Notes
 - Direct access to `.json` flat-file databases in the `data/` directory is strictly forbidden via HTTP/HTTPS.
