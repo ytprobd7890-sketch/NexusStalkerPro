@@ -1,21 +1,18 @@
-FROM alpine:latest
+FROM python:3.10-slim
 
-# Install FFmpeg, Node.js, NPM, and Bash in one fast layer
-RUN apk add --no-cache ffmpeg nodejs npm bash
+# Install FFmpeg in the python base image
+RUN apt-get update && apt-get install -y ffmpeg && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Create app directory
+# Set working directory inside container
 WORKDIR /usr/src/app
 
-# Copy package.json
-COPY package.json ./
+# Copy requirement file
+COPY requirements.txt ./
 
-# Copy server code
-COPY server.js ./
+# Install required python packages
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Create cache directory and grant absolute write permissions
-RUN mkdir -p cache_segments && chmod -R 777 cache_segments
+# Copy the FFmpeg cacher script
+COPY ffmpeg_warmer.py ./
 
-# Expose default port assigned by Railway
-EXPOSE 8080
-
-CMD [ "node", "server.js" ]
+CMD [ "python", "-u", "ffmpeg_warmer.py" ]
