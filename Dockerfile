@@ -11,6 +11,10 @@ RUN apt-get update && apt-get install -y \
 # Enable Apache rewrite module
 RUN a2enmod rewrite
 
+# Disable conflicting MPMs and force mpm_prefork (Required for Railway's environment)
+RUN a2dismod mpm_event mpm_worker || true
+RUN a2enmod mpm_prefork || true
+
 # Copy our optimized php.ini configurations
 COPY optimized.ini /usr/local/etc/php/conf.d/optimized.ini
 
@@ -20,12 +24,12 @@ COPY . /var/www/html/
 # Ensure write permissions for our JSON flat-file databases
 RUN chmod -R 777 /var/www/html/data
 
-# Optimize Apache MPM Prefork settings for 1GB RAM to prevent memory exhaustion
+# Optimize Apache MPM Prefork settings for 512MB RAM to prevent memory exhaustion
 RUN echo '<IfModule mpm_prefork_module>\n\
     StartServers             2\n\
     MinSpareServers          2\n\
     MaxSpareServers          5\n\
-    MaxRequestWorkers       30\n\
+    MaxRequestWorkers       25\n\
     MaxConnectionsPerChild   1000\n\
 </IfModule>' >> /etc/apache2/apache2.conf
 
